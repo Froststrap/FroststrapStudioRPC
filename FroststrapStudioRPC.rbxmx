@@ -1,0 +1,252 @@
+<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">
+	<External>null</External>
+	<External>nil</External>
+	<Item class="Folder" referent="RBXA6BE05E54D7F422E881CC720482F90BD">
+		<Properties>
+			<BinaryString name="AttributesSerialize"></BinaryString>
+			<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
+			<bool name="DefinesCapabilities">false</bool>
+			<string name="Name">FroststrapStudioRPC</string>
+			<int64 name="SourceAssetId">-1</int64>
+			<BinaryString name="Tags"></BinaryString>
+		</Properties>
+		<Item class="Script" referent="RBX1CEDFD48233C4D09A8A775482715815F">
+			<Properties>
+				<ProtectedString name="Source"><![CDATA[local RPCDataLogger = require(script.Parent.RPCDataLogger)
+
+if plugin then
+	local toolbar = plugin:CreateToolbar("Froststrap RPC")
+	local button = toolbar:CreateButton("RPC Logger", "Toggle RPC logging", "")
+	local isEnabled = true
+
+	button:SetActive(true)
+
+	button.Click:Connect(function()
+		isEnabled = not isEnabled
+		RPCDataLogger.setEnabled(isEnabled)
+		button:SetActive(isEnabled)
+	end)
+
+	plugin.Unloading:Connect(function()
+		RPCDataLogger.cleanup()
+	end)
+end
+
+RPCDataLogger.initialize()]]></ProtectedString>
+				<bool name="Disabled">false</bool>
+				<Content name="LinkedSource"><null></null></Content>
+				<token name="RunContext">0</token>
+				<string name="ScriptGuid">{1FE86719-F509-4630-A0F9-478DF88F8FB2}</string>
+				<BinaryString name="AttributesSerialize"></BinaryString>
+				<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
+				<bool name="DefinesCapabilities">false</bool>
+				<string name="Name">Main</string>
+				<int64 name="SourceAssetId">-1</int64>
+				<BinaryString name="Tags"></BinaryString>
+			</Properties>
+		</Item>
+		<Item class="ModuleScript" referent="RBX929C90E74A3449438E54E096B0BA9F7E">
+			<Properties>
+				<Content name="LinkedSource"><null></null></Content>
+				<ProtectedString name="Source"><![CDATA[local RPCDataLogger = {}
+
+local function isPluginContext()
+	return pcall(function() return plugin ~= nil end)
+end
+
+local Selection = nil
+if isPluginContext() then
+	Selection = game:GetService("Selection")
+end
+
+local enabled = true
+local lastScriptName = ""
+local lastPlaceName = ""
+local lastActivity = ""
+local logCooldown = false
+
+function RPCDataLogger.getSelectedScript()
+	if not Selection then return nil end
+
+	local success, result = pcall(function()
+		return Selection:Get()
+	end)
+
+	if not success then return nil end
+
+	for _, obj in ipairs(result) do
+		if obj:IsA("LuaSourceContainer") then
+			return obj
+		end
+	end
+
+	return nil
+end
+
+function RPCDataLogger.getScriptLineCount(scriptObj)
+	if not scriptObj then return 0 end
+
+	local source = scriptObj.Source or ""
+	if source == "" then return 1 end
+
+	local lines = 1
+	for i = 1, #source do
+		if string.sub(source, i, i) == "\n" then
+			lines = lines + 1
+		end
+	end
+
+	return lines
+end
+
+function RPCDataLogger.getActivityStatus()
+	if RPCDataLogger.getSelectedScript() then
+		return "Editing"
+	end
+
+	return "Active"
+end
+
+function RPCDataLogger.collectData()
+	if not enabled then return nil end
+
+	local data = {
+		activity = RPCDataLogger.getActivityStatus()
+	}
+
+	data.place = {
+		name = game.Name,
+		placeId = game.PlaceId
+	}
+
+	local selectedScript = RPCDataLogger.getSelectedScript()
+
+	if selectedScript then
+		data.script = {
+			name = selectedScript.Name,
+			className = selectedScript.ClassName,
+			parent = selectedScript.Parent and selectedScript.Parent.Name or "None",
+			lines = RPCDataLogger.getScriptLineCount(selectedScript)
+		}
+	else
+		data.script = {name = "None", lines = 0}
+	end
+
+	return data
+end
+
+function RPCDataLogger.logData(data)
+	if not data or not enabled or logCooldown then return end
+
+	logCooldown = true
+	task.spawn(function()
+		task.wait(0.2)
+		logCooldown = false
+	end)
+
+	local scriptChanged = data.script.name ~= lastScriptName
+	local activityChanged = data.activity ~= lastActivity
+
+	if not (scriptChanged or activityChanged) then
+		return
+	end
+
+	if data.activity == "Editing" and data.script.name ~= "None" then
+		RPCDataLogger.printWithPrefix(string.format(
+			"Editing %s (%d lines) in %s",
+			data.script.name,
+			data.script.lines,
+			data.script.parent
+			))
+	elseif data.activity == "Active" then
+		RPCDataLogger.printWithPrefix("Active in " .. data.place.name)
+	end
+
+	lastScriptName = data.script.name
+	lastActivity = data.activity
+	lastPlaceName = data.place.name
+end
+
+function RPCDataLogger.printWithPrefix(message)
+	if not enabled then return end
+	print("[FroststrapStudioRPC] " .. tostring(message))
+end
+
+function RPCDataLogger.setupEventListeners()
+	if not Selection then return end
+
+	Selection.SelectionChanged:Connect(function()
+		if not enabled then return end
+
+		task.wait(0.05)
+
+		local data = RPCDataLogger.collectData()
+		RPCDataLogger.logData(data)
+	end)
+end
+
+function RPCDataLogger.initialize()
+	if isPluginContext() then
+		RPCDataLogger.setupEventListeners()
+
+		local initialData = RPCDataLogger.collectData()
+		RPCDataLogger.logData(initialData)
+	end
+end
+
+function RPCDataLogger.setEnabled(state)
+	enabled = state
+	if isPluginContext() then
+		RPCDataLogger.printWithPrefix(state and "ENABLED" or "DISABLED")
+	end
+end
+
+function RPCDataLogger.isEnabled()
+	return enabled
+end
+
+function RPCDataLogger.cleanup()
+	enabled = false
+	if isPluginContext() then
+		RPCDataLogger.printWithPrefix("Unloading...")
+	end
+end
+
+return RPCDataLogger]]></ProtectedString>
+				<string name="ScriptGuid">{20FC109B-3E32-4AA7-AD5A-756BB7836BAC}</string>
+				<BinaryString name="AttributesSerialize"></BinaryString>
+				<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
+				<bool name="DefinesCapabilities">false</bool>
+				<string name="Name">RPCDataLogger</string>
+				<int64 name="SourceAssetId">-1</int64>
+				<BinaryString name="Tags"></BinaryString>
+			</Properties>
+		</Item>
+		<Item class="ModuleScript" referent="RBX2EF5C6666DE74FAEB7A471CDA0174C47">
+			<Properties>
+				<Content name="LinkedSource"><null></null></Content>
+				<ProtectedString name="Source"><![CDATA[local RPCConfig = {
+	enabled = true,
+	showSeparator = true,
+	idleTimeout = 30,
+	idleCheckInterval = 15
+}
+
+function RPCConfig.validate()
+	if RPCConfig.idleTimeout < 10 then
+		RPCConfig.idleTimeout = 10
+	end
+end
+
+return RPCConfig]]></ProtectedString>
+				<string name="ScriptGuid">{61C1D5EB-4248-4B7D-A724-FC6EAC972042}</string>
+				<BinaryString name="AttributesSerialize"></BinaryString>
+				<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
+				<bool name="DefinesCapabilities">false</bool>
+				<string name="Name">RPCConfig</string>
+				<int64 name="SourceAssetId">-1</int64>
+				<BinaryString name="Tags"></BinaryString>
+			</Properties>
+		</Item>
+	</Item>
+</roblox>
