@@ -63,6 +63,7 @@ local enabled = true
 local lastScriptName = ""
 local lastPlaceName = ""
 local lastActivity = ""
+local lastTestingState = false
 local logCooldown = false
 
 function RPCDataLogger.getSelectedScript()
@@ -99,19 +100,62 @@ function RPCDataLogger.getScriptLineCount(scriptObj)
 	return lines
 end
 
+function RPCDataLogger.getScriptType(scriptObj)
+	if not scriptObj then return "Unknown" end
+
+	if scriptObj:IsA("LocalScript") then
+		return "Client"
+	end
+
+	if scriptObj:IsA("Script") then
+		local parent = scriptObj.Parent
+		while parent do
+			if parent:IsA("StarterPlayerScripts") or parent:IsA("StarterCharacterScripts") or 
+				parent:IsA("StarterGui") or parent:IsA("PlayerScripts") then
+				return "Client"
+			end
+			parent = parent.Parent
+		end
+		return "Server"
+	end
+
+	if scriptObj:IsA("ModuleScript") then
+		local parent = scriptObj.Parent
+		while parent do
+			if parent:IsA("ServerScriptService") or parent:IsA("ServerStorage") then
+				return "Server Module"
+			elseif parent:IsA("StarterPlayerScripts") or parent:IsA("StarterCharacterScripts") or 
+				parent:IsA("StarterGui") or parent:IsA("PlayerScripts") then
+				return "Client Module"
+			end
+			parent = parent.Parent
+		end
+		return "Module"
+	end
+
+	return "Unknown"
+end
+
 function RPCDataLogger.getActivityStatus()
 	if RPCDataLogger.getSelectedScript() then
 		return "Editing"
 	end
+	return "Developing"
+end
 
-	return "Active"
+function RPCDataLogger.isTesting()
+	local success, result = pcall(function()
+		return game:GetService("RunService"):IsRunning()
+	end)
+	return success and result
 end
 
 function RPCDataLogger.collectData()
 	if not enabled then return nil end
 
 	local data = {
-		activity = RPCDataLogger.getActivityStatus()
+		activity = RPCDataLogger.getActivityStatus(),
+		testing = RPCDataLogger.isTesting()
 	}
 
 	data.place = {
@@ -125,11 +169,11 @@ function RPCDataLogger.collectData()
 		data.script = {
 			name = selectedScript.Name,
 			className = selectedScript.ClassName,
-			parent = selectedScript.Parent and selectedScript.Parent.Name or "None",
-			lines = RPCDataLogger.getScriptLineCount(selectedScript)
+			lines = RPCDataLogger.getScriptLineCount(selectedScript),
+			type = RPCDataLogger.getScriptType(selectedScript)
 		}
 	else
-		data.script = {name = "None", lines = 0}
+		data.script = {name = "None", lines = 0, type = "None"}
 	end
 
 	return data
@@ -146,25 +190,51 @@ function RPCDataLogger.logData(data)
 
 	local scriptChanged = data.script.name ~= lastScriptName
 	local activityChanged = data.activity ~= lastActivity
+	local placeChanged = data.place.name ~= lastPlaceName
+	local testingChanged = data.testing ~= lastTestingState
 
-	if not (scriptChanged or activityChanged) then
+	if not (scriptChanged or activityChanged or placeChanged or testingChanged) then
 		return
 	end
 
+	local testingText = data.testing and "True" or "False"
+
 	if data.activity == "Editing" and data.script.name ~= "None" then
+		local displayText
+		if data.script.type == "Server" then
+			displayText = string.format("Server - %s", data.script.name)
+		elseif data.script.type == "Client" then
+			displayText = string.format("Client - %s", data.script.name)
+		elseif data.script.type == "Server Module" then
+			displayText = string.format("Server Module - %s", data.script.name)
+		elseif data.script.type == "Client Module" then
+			displayText = string.format("Client Module - %s", data.script.name)
+		elseif data.script.type == "Module" then
+			displayText = string.format("Module - %s", data.script.name)
+		else
+			displayText = data.script.name
+		end
+
 		RPCDataLogger.printWithPrefix(string.format(
-			"Editing %s (%d lines) in %s",
-			data.script.name,
+			"Editing %s (%d lines) | Workspace: %s | Testing: %s",
+			displayText,
 			data.script.lines,
-			data.script.parent
+			data.place.name,
+			testingText
 			))
-	elseif data.activity == "Active" then
-		RPCDataLogger.printWithPrefix("Active in " .. data.place.name)
+	else
+		RPCDataLogger.printWithPrefix(string.format(
+			"%s | Workspace: %s | Testing: %s",
+			data.activity,
+			data.place.name,
+			testingText
+			))
 	end
 
 	lastScriptName = data.script.name
 	lastActivity = data.activity
 	lastPlaceName = data.place.name
+	lastTestingState = data.testing
 end
 
 function RPCDataLogger.printWithPrefix(message)
@@ -191,6 +261,17 @@ function RPCDataLogger.initialize()
 
 		local initialData = RPCDataLogger.collectData()
 		RPCDataLogger.logData(initialData)
+
+		task.spawn(function()
+			while enabled do
+				task.wait(1)
+
+				if enabled then
+					local data = RPCDataLogger.collectData()
+					RPCDataLogger.logData(data)
+				end
+			end
+		end)
 	end
 end
 
@@ -228,15 +309,7 @@ return RPCDataLogger]]></ProtectedString>
 				<ProtectedString name="Source"><![CDATA[local RPCConfig = {
 	enabled = true,
 	showSeparator = true,
-	idleTimeout = 30,
-	idleCheckInterval = 15
 }
-
-function RPCConfig.validate()
-	if RPCConfig.idleTimeout < 10 then
-		RPCConfig.idleTimeout = 10
-	end
-end
 
 return RPCConfig]]></ProtectedString>
 				<string name="ScriptGuid">{61C1D5EB-4248-4B7D-A724-FC6EAC972042}</string>
