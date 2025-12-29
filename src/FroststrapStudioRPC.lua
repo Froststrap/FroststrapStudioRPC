@@ -1,9 +1,4 @@
-<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">
-	<External>null</External>
-	<External>nil</External>
-	<Item class="Script" referent="RBXC5BC586DE75A4002A71E0C2D844FC0F7">
-		<Properties>
-			<ProtectedString name="Source"><![CDATA[-- FroststrapStudioRPC SDK v1.1.0
+-- FroststrapStudioRPC SDK v1.1.0
 
 local Selection = game:GetService("Selection")
 local RunService = game:GetService("RunService")
@@ -413,17 +408,4 @@ if Plugin then
 	end)
 end
 
-return FroststrapStudioRPC]]></ProtectedString>
-			<bool name="Disabled">false</bool>
-			<Content name="LinkedSource"><null></null></Content>
-			<token name="RunContext">0</token>
-			<string name="ScriptGuid">{A14B977C-1BEC-4281-9385-C89195ABF89F}</string>
-			<BinaryString name="AttributesSerialize"></BinaryString>
-			<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
-			<bool name="DefinesCapabilities">false</bool>
-			<string name="Name">FroststrapStudioRPC</string>
-			<int64 name="SourceAssetId">-1</int64>
-			<BinaryString name="Tags"></BinaryString>
-		</Properties>
-	</Item>
-</roblox>
+return FroststrapStudioRPC
