@@ -8,13 +8,14 @@
 local Selection = game:GetService("Selection")
 local RunService = game:GetService("RunService")
 local HttpService = game:GetService("HttpService")
+local MarketplaceService = game:GetService("MarketplaceService")
 
 local FroststrapStudioRPC = {}
 local Plugin = if plugin then plugin else nil
 
 FroststrapStudioRPC.Config = {
 	enabled = true,
-	httpTimeout = 1,
+	httpTimeout = 1
 }
 
 local State = {
@@ -25,6 +26,7 @@ local State = {
 	isCooldown = false,
 	isInitialized = false,
 	selectionChanged = false,
+	monitoringThread = nil,
 }
 
 local ScriptTypes = {
@@ -39,7 +41,7 @@ local ScriptTypes = {
 
 local ActivityStates = {
 	EDITING = "Editing",
-	DEVELOPING = "Developing",
+	DESIGNING = "Not In A Script Editor",
 }
 
 local Toolbar = nil
@@ -164,12 +166,12 @@ end
 local function getActivityState()
 	local scriptObj = getSelectedScript()
 	if not scriptObj then
-		return ActivityStates.DEVELOPING
+		return ActivityStates.DESIGNING
 	end
 
 	local className = scriptObj.ClassName
 	if className ~= "Script" and className ~= "LocalScript" and className ~= "ModuleScript" then
-		return ActivityStates.DEVELOPING
+		return ActivityStates.DESIGNING
 	end
 
 	return ActivityStates.EDITING
@@ -183,10 +185,20 @@ local function isTesting()
 end
 
 local function getWorkspaceName()
-	local success, name = pcall(function()
+	local success, placeInfo = pcall(function()
+		local MarketplaceService = game:GetService("MarketplaceService")
+		return MarketplaceService:GetProductInfoAsync(game.PlaceId)
+	end)
+
+	if success and placeInfo and placeInfo.Name then
+		return placeInfo.Name
+	end
+
+	local fallbackSuccess, name = pcall(function()
 		return game.Name
 	end)
-	return if success and name and #name > 0 then name else "Unknown Workspace"
+
+	return if fallbackSuccess and name and #name > 0 then name else "Unknown Workspace"
 end
 
 local function formatScriptDisplay(scriptObj)
@@ -219,25 +231,26 @@ local function collectActivityData()
 	local activity = getActivityState()
 	local testing = isTesting()
 	local workspaceName = getWorkspaceName()
+
 	local details = ""
 	local state = ""
 	local scriptType = ScriptTypes.DEVELOPING
+
+	details = sanitizeText(string.format("Workspace: %s", workspaceName), 128)
 
 	if scriptObj and activity == ActivityStates.EDITING then
 		local scriptDisplay, type = formatScriptDisplay(scriptObj)
 		scriptType = type
 		local lineCount = getScriptLineCount(scriptObj)
 		if lineCount > 0 then
-			details = sanitizeText(string.format("%s (%d lines)", scriptDisplay, lineCount), 128)
+			state = sanitizeText(string.format("%s (%d lines)", scriptDisplay, lineCount), 128)
 		else
-			details = sanitizeText(scriptDisplay, 128)
+			state = sanitizeText(scriptDisplay, 128)
 		end
 	else
-		details = sanitizeText(activity, 128)
+		state = sanitizeText(activity, 128)
 		scriptType = ScriptTypes.DEVELOPING
 	end
-
-	state = sanitizeText(string.format("Workspace: %s", workspaceName), 128)
 
 	return {
 		details = details,
@@ -265,6 +278,38 @@ local function updateStateCache(newData)
 	State.selectionChanged = false
 end
 
+local function performPeriodicCheck()
+	if not FroststrapStudioRPC.Config.enabled then return end
+
+	local activityData = collectActivityData()
+	if not activityData then return end
+
+	if hasActivityChanged(activityData) then
+		FroststrapStudioRPC.SendMessage(activityData)
+		updateStateCache(activityData)
+	end
+end
+
+local function startMonitoring()
+	if State.monitoringThread then
+		return
+	end
+
+	State.monitoringThread = task.spawn(function()
+		while FroststrapStudioRPC.Config.enabled do
+			performPeriodicCheck()
+			task.wait(5)
+		end
+		State.monitoringThread = nil
+	end)
+end
+
+local function stopMonitoring()
+	if State.monitoringThread then
+		State.monitoringThread = nil
+	end
+end
+
 local function sendViaHTTP(jsonString)
 	task.spawn(function()
 		local url = "http://localhost:4875/rpc"
@@ -282,6 +327,29 @@ local function sendViaHTTP(jsonString)
 
 		return success
 	end)
+end
+
+local function sendToggleCommand(enabled)
+	local toggleMessage = {
+		command = "RPCToggle",
+		data = {
+			enabled = enabled,
+			workspace = getWorkspaceName()
+		}
+	}
+
+	local jsonString
+	local success, result = pcall(function()
+		return HttpService:JSONEncode(toggleMessage)
+	end)
+
+	if not success then
+		jsonString = '{"error":"json_encoding_failed"}'
+	else
+		jsonString = result
+	end
+
+	sendViaHTTP(jsonString)
 end
 
 function FroststrapStudioRPC.SendMessage(data)
@@ -340,12 +408,18 @@ end
 
 function FroststrapStudioRPC.SetEnabled(enabled)
 	FroststrapStudioRPC.Config.enabled = enabled
+
+	sendToggleCommand(enabled)
+
 	if enabled then
+		startMonitoring()
+		task.wait(0.1)
 		FroststrapStudioRPC.ForceUpdate()
 		if Button then 
 			Button:SetActive(true)
 		end
 	else
+		stopMonitoring()
 		if Button then 
 			Button:SetActive(false)
 		end
@@ -361,13 +435,25 @@ function FroststrapStudioRPC.Initialize()
 
 	if Plugin then
 		Toolbar = Plugin:CreateToolbar("Froststrap RPC")
-		Button = Toolbar:CreateButton("RPC", "Toggle Rich Presence logging", "rbxassetid://111400040119373")
-
+		Button = Toolbar:CreateButton("RPC", "Toggle RPC Info (Script type, Lines amount, Etc)", "rbxassetid://111400040119373")
 		Button.Click:Connect(function()
 			FroststrapStudioRPC.Toggle()
 		end)
-
 		Button:SetActive(FroststrapStudioRPC.Config.enabled)
+
+		sendToggleCommand(FroststrapStudioRPC.Config.enabled)
+
+		local toggleAction = Plugin:CreatePluginAction(
+			"toggle_rpc_command",
+			"Toggle RPC",
+			"Toggle Rich Presence logging on/off",
+			"rbxassetid://111400040119373",
+			false
+		)
+
+		toggleAction.Triggered:Connect(function()
+			FroststrapStudioRPC.Toggle()
+		end)
 
 		Plugin.Unloading:Connect(function()
 			FroststrapStudioRPC.Cleanup()
@@ -381,23 +467,21 @@ function FroststrapStudioRPC.Initialize()
 		end)
 	end
 
-	task.spawn(function()
-		while true do
-			task.wait(1)
-			if FroststrapStudioRPC.Config.enabled then
-				FroststrapStudioRPC.UpdatePresence()
-			end
-		end
-	end)
-
-	task.wait(0.5)
 	if FroststrapStudioRPC.Config.enabled then
+		startMonitoring()
+		task.wait(0.5)
 		FroststrapStudioRPC.ForceUpdate()
 	end
+
 	State.isInitialized = true
 end
 
 function FroststrapStudioRPC.Cleanup()
+	if FroststrapStudioRPC.Config.enabled then
+		sendToggleCommand(false)
+	end
+
+	stopMonitoring()
 	FroststrapStudioRPC.SetEnabled(false)
 	State.isInitialized = false
 	if Button then
