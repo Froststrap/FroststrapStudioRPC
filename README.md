@@ -5,7 +5,6 @@ Heavily inspired by [StudioPresence](https://github.com/iArxic/StudioPresence)
 ## Features
 - Real-time activity tracking in Roblox Studio
 - Displays info about what you're doing in Roblox Studio
-- (Add more features here)
 
 **Note:** This will require the Froststrap app when it releases.
 
@@ -24,3 +23,11 @@ Heavily inspired by [StudioPresence](https://github.com/iArxic/StudioPresence)
     <img src="./.resources/CurrentlyTesting.png" height=150 alt="Currently Testing" title="Currently Testing"/>
     <img src="./.resources/CurrentlyTestingText.png" height=150 alt="Testing Status" title="Testing Status"/>
 </p>
+
+## Installation Process
+- Place FroststrapStudioRPC.rbxmx into your Roblox Plugins folder (automatically done if enabled in froststrap)
+- Launch Roblox Studio through Froststrap
+
+## Developers
+- Made by [RealMeddsam](https://github.com/RealMeddsam)
+- Inspired by [Studio Presence](https://github.com/iArxic/StudioPresence)
