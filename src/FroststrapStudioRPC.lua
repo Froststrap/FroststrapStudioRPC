@@ -1,495 +1,246 @@
--- FroststrapStudioRPC SDK v1.1.0
-
+-- FroststrapStudioRPC SDK v1.2.0
 local Selection = game:GetService("Selection")
 local RunService = game:GetService("RunService")
 local HttpService = game:GetService("HttpService")
 local MarketplaceService = game:GetService("MarketplaceService")
+local Players = game:GetService("Players")
+local StudioService = game:GetService("StudioService")
+local ScriptEditorService = game:GetService("ScriptEditorService")
 
 local FroststrapStudioRPC = {}
 local Plugin = if plugin then plugin else nil
 
 FroststrapStudioRPC.Config = {
 	enabled = true,
-	httpTimeout = 1
+	httpTimeout = 1,
+	updateInterval = 10,
+	port = 4875
 }
 
 local State = {
-	lastActivity = "",
-	lastPlaceName = "",
-	lastTesting = false,
-	lastScriptType = "",
+	lastPayload = {},
 	isCooldown = false,
 	isInitialized = false,
-	selectionChanged = false,
 	monitoringThread = nil,
+	connections = {},
 }
 
 local ScriptTypes = {
-	SERVER = "server",
-	CLIENT = "client",
-	SERVER_MODULE = "server_module",
-	CLIENT_MODULE = "client_module",
-	MODULE = "module",
-	UNKNOWN = "unknown",
-	DEVELOPING = "developing"
+	SERVER = "Server Script",
+	CLIENT = "Local Script",
+	SERVER_MODULE = "Server Module",
+	CLIENT_MODULE = "Client Module",
+	MODULE = "Module",
+	DEVELOPING = "Developing"
 }
 
-local ActivityStates = {
-	EDITING = "Editing",
-	DESIGNING = "Not In A Script Editor",
-}
-
-local Toolbar = nil
-local Button = nil
-
-local function trimString(str)
-	if not str then return "" end
-	return string.match(str, "^%s*(.-)%s*$") or ""
+local function clearConnections()
+	for name, connection in pairs(State.connections) do
+		if connection then
+			connection:Disconnect()
+		end
+	end
+	table.clear(State.connections)
 end
 
 local function getScriptLineCount(scriptObj)
-	if not scriptObj then return 0 end
-
-	local className = scriptObj.ClassName
-	if className ~= "Script" and className ~= "LocalScript" and className ~= "ModuleScript" then
-		return 0
-	end
-
+	if not scriptObj or not scriptObj:IsA("LuaSourceContainer") then return 0 end
 	local success, source = pcall(function()
-		return scriptObj.Source or ""
+		return ScriptEditorService:GetEditorSource(scriptObj)
 	end)
-
-	if not success or source == "" then 
-		return 1 
+	if not success or not source or source == "" then
+		success, source = pcall(function() return scriptObj.Source end)
 	end
-
-	local lines = 1
-	for i = 1, #source do
-		if string.sub(source, i, i) == "\n" then
-			lines = lines + 1
-		end
-	end
-
-	return lines
-end
-
-local function truncateTextWithWordBoundary(text, maxLength)
-	if not text or #text == 0 then return "" end
-	text = trimString(text)
-
-	if #text <= maxLength then
-		return text
-	end
-
-	local truncated = text:sub(1, maxLength - 3)
-	local lastSpace = truncated:reverse():find(" ")
-
-	if lastSpace then
-		truncated = truncated:sub(1, maxLength - 3 - lastSpace + 1)
-	end
-
-	return truncated .. "..."
-end
-
-local function sanitizeText(text, maxLength)
-	if not text or #text == 0 then return "" end
-	text = text:gsub("[\n\r]+", " "):gsub("%s+", " ")
-	return truncateTextWithWordBoundary(text, maxLength)
-end
-
-local function getSelectedScript()
-	if not Plugin then return nil end
-	local success, selected = pcall(function()
-		return Selection:Get()
-	end)
-	if not success then return nil end
-
-	local scriptCount = 0
-	local foundScript = nil
-
-	for _, obj in ipairs(selected) do
-		local className = obj.ClassName
-		if className == "Script" or className == "LocalScript" or className == "ModuleScript" then
-			scriptCount = scriptCount + 1
-			foundScript = obj
-		end
-	end
-
-	if scriptCount == 1 then
-		return foundScript
-	end
-
-	return nil
+	if not success or not source then return 0 end
+	local _, count = source:gsub("\n", "")
+	return count + 1
 end
 
 local function getScriptType(scriptObj)
 	if not scriptObj then return ScriptTypes.DEVELOPING end
-	local className = scriptObj.ClassName
-
-	if className == "LocalScript" then
+	if scriptObj:IsA("Script") and scriptObj.RunContext == Enum.RunContext.Client then
 		return ScriptTypes.CLIENT
-	elseif className == "Script" then
-		local parent = scriptObj.Parent
-		while parent do
-			local parentName = parent.Name
-			if parent:IsA("ServerScriptService") or parent:IsA("ServerStorage") then
-				return ScriptTypes.SERVER
-			elseif parent:IsA("StarterPlayerScripts") or parent:IsA("StarterCharacterScripts") or
-				parent:IsA("StarterGui") or parent:IsA("PlayerScripts") then
-				return ScriptTypes.CLIENT
-			end
-			parent = parent.Parent
+	end
+	if scriptObj:IsA("LocalScript") then return ScriptTypes.CLIENT end
+	local isServerContext = false
+	local isClientContext = false
+	local ancestor = scriptObj.Parent
+	while ancestor do
+		if ancestor:IsA("ServerScriptService") or ancestor:IsA("ServerStorage") then
+			isServerContext = true
+			break
+		elseif ancestor:IsA("StarterPlayer") or ancestor:IsA("StarterGui") or ancestor:IsA("StarterPack") then
+			isClientContext = true
+			break
 		end
-		return ScriptTypes.SERVER
-	elseif className == "ModuleScript" then
-		local parent = scriptObj.Parent
-		while parent do
-			if parent:IsA("ServerScriptService") or parent:IsA("ServerStorage") then
-				return ScriptTypes.SERVER_MODULE
-			elseif parent:IsA("StarterPlayerScripts") or parent:IsA("StarterCharacterScripts") or
-				parent:IsA("StarterGui") or parent:IsA("PlayerScripts") then
-				return ScriptTypes.CLIENT_MODULE
-			end
-			parent = parent.Parent
-		end
+		ancestor = ancestor.Parent
+	end
+	if scriptObj:IsA("ModuleScript") then
+		if isServerContext then return ScriptTypes.SERVER_MODULE end
+		if isClientContext then return ScriptTypes.CLIENT_MODULE end
 		return ScriptTypes.MODULE
 	end
-
-	return ScriptTypes.DEVELOPING
-end
-
-local function getActivityState()
-	local scriptObj = getSelectedScript()
-	if not scriptObj then
-		return ActivityStates.DESIGNING
-	end
-
-	local className = scriptObj.ClassName
-	if className ~= "Script" and className ~= "LocalScript" and className ~= "ModuleScript" then
-		return ActivityStates.DESIGNING
-	end
-
-	return ActivityStates.EDITING
-end
-
-local function isTesting()
-	local success, result = pcall(function()
-		return RunService:IsRunning()
-	end)
-	return success and result
+	return isServerContext and ScriptTypes.SERVER or ScriptTypes.CLIENT
 end
 
 local function getWorkspaceName()
-	local success, placeInfo = pcall(function()
-		local MarketplaceService = game:GetService("MarketplaceService")
-		return MarketplaceService:GetProductInfoAsync(game.PlaceId)
-	end)
-
-	if success and placeInfo and placeInfo.Name then
-		return placeInfo.Name
+	local name = "Unsaved Studio Project"
+	local isPublic = false
+	if game.PlaceId > 0 then
+		local success, info = pcall(function()
+			return MarketplaceService:GetProductInfoAsync(game.PlaceId)
+		end)
+		if success and info then
+			name = info.Name or name
+			isPublic = true
+		end
+	else
+		name = (game.Name ~= "Place" and game.Name ~= "") and game.Name or name
 	end
-
-	local fallbackSuccess, name = pcall(function()
-		return game.Name
-	end)
-
-	return if fallbackSuccess and name and #name > 0 then name else "Unknown Workspace"
-end
-
-local function formatScriptDisplay(scriptObj)
-	if not scriptObj then return "None", ScriptTypes.DEVELOPING end
-
-	local className = scriptObj.ClassName
-	if className ~= "Script" and className ~= "LocalScript" and className ~= "ModuleScript" then
-		return "Developing", ScriptTypes.DEVELOPING
+	local devCount = #Players:GetPlayers()
+	if devCount > 1 then
+		name = string.format("%s (%d Developers)", name, devCount)
 	end
-
-	local scriptType = getScriptType(scriptObj)
-	local prefix = ""
-	if scriptType == ScriptTypes.SERVER then
-		prefix = "Editing Server - "
-	elseif scriptType == ScriptTypes.CLIENT then
-		prefix = "Editing Client - "
-	elseif scriptType == ScriptTypes.SERVER_MODULE then
-		prefix = "Editing Server Module - "
-	elseif scriptType == ScriptTypes.CLIENT_MODULE then
-		prefix = "Editing Client Module - "
-	elseif scriptType == ScriptTypes.MODULE then
-		prefix = "Editing Module - "
-	end
-	return prefix .. scriptObj.Name, scriptType
+	return name, isPublic
 end
 
 local function collectActivityData()
 	if not FroststrapStudioRPC.Config.enabled then return nil end
-	local scriptObj = getSelectedScript()
-	local activity = getActivityState()
-	local testing = isTesting()
-	local workspaceName = getWorkspaceName()
 
-	local details = ""
-	local state = ""
+	local activeScript = StudioService.ActiveScript
+	local scriptObj = nil
+
+	-- Prioritize the script currently open in the editor
+	if activeScript and activeScript:IsA("LuaSourceContainer") then
+		scriptObj = activeScript
+	else
+		-- Fix: Selection:Get() returns a table. We must index [1] to use :IsA()
+		local selected = Selection:Get()
+		if #selected == 1 and selected[1]:IsA("LuaSourceContainer") then
+			scriptObj = selected[1]
+		end
+	end
+
+	local testing = RunService:IsRunning()
+	local workspaceName, isPublic = getWorkspaceName()
+	local stateText = "Not in a Script"
 	local scriptType = ScriptTypes.DEVELOPING
 
-	details = sanitizeText(string.format("Workspace: %s", workspaceName), 128)
-
-	if scriptObj and activity == ActivityStates.EDITING then
-		local scriptDisplay, type = formatScriptDisplay(scriptObj)
-		scriptType = type
-		local lineCount = getScriptLineCount(scriptObj)
-		if lineCount > 0 then
-			state = sanitizeText(string.format("%s (%d lines)", scriptDisplay, lineCount), 128)
-		else
-			state = sanitizeText(scriptDisplay, 128)
-		end
-	else
-		state = sanitizeText(activity, 128)
-		scriptType = ScriptTypes.DEVELOPING
+	if scriptObj then
+		scriptType = getScriptType(scriptObj)
+		local lines = getScriptLineCount(scriptObj)
+		stateText = string.format("Editing %s: %s (%d lines)", scriptObj.Name, scriptType, lines)
 	end
 
 	return {
-		details = details,
-		state = state,
+		details = "Workspace: ".. workspaceName,
+		state = stateText,
 		testing = testing,
 		scriptType = scriptType,
+		placeId = game.PlaceId,
+		isPublic = isPublic
 	}
-end
+end   
 
-local function hasActivityChanged(newData)
-	if not newData then return false end
-	return newData.details ~= State.lastActivity or
-		newData.state ~= State.lastPlaceName or
-		newData.testing ~= State.lastTesting or
-		newData.scriptType ~= State.lastScriptType or
-		State.selectionChanged
-end
-
-local function updateStateCache(newData)
-	if not newData then return end
-	State.lastActivity = newData.details or ""
-	State.lastPlaceName = newData.state or ""
-	State.lastTesting = newData.testing or false
-	State.lastScriptType = newData.scriptType or ScriptTypes.DEVELOPING
-	State.selectionChanged = false
-end
-
-local function performPeriodicCheck()
-	if not FroststrapStudioRPC.Config.enabled then return end
-
-	local activityData = collectActivityData()
-	if not activityData then return end
-
-	if hasActivityChanged(activityData) then
-		FroststrapStudioRPC.SendMessage(activityData)
-		updateStateCache(activityData)
-	end
-end
-
-local function startMonitoring()
-	if State.monitoringThread then
-		return
-	end
-
-	State.monitoringThread = task.spawn(function()
-		while FroststrapStudioRPC.Config.enabled do
-			performPeriodicCheck()
-			task.wait(5)
-		end
-		State.monitoringThread = nil
-	end)
-end
-
-local function stopMonitoring()
-	if State.monitoringThread then
-		State.monitoringThread = nil
-	end
-end
-
-local function sendViaHTTP(jsonString)
+local function sendViaHTTP(payload)
 	task.spawn(function()
 		local url = "http://localhost:4875/rpc"
-
-		local success, result = pcall(function()
-			local options = {
+		pcall(function()
+			HttpService:RequestAsync({
 				Url = url,
 				Method = "POST",
 				Headers = {["Content-Type"] = "application/json"},
-				Body = jsonString
-			}
-			local response = HttpService:RequestAsync(options)
-			return response.Success and response.StatusCode >= 200 and response.StatusCode < 300
+				Body = HttpService:JSONEncode(payload),
+				Timeout = FroststrapStudioRPC.Config.httpTimeout
+			})
 		end)
-
-		return success
 	end)
-end
-
-local function sendToggleCommand(enabled)
-	local toggleMessage = {
-		command = "RPCToggle",
-		data = {
-			enabled = enabled,
-			workspace = getWorkspaceName()
-		}
-	}
-
-	local jsonString
-	local success, result = pcall(function()
-		return HttpService:JSONEncode(toggleMessage)
-	end)
-
-	if not success then
-		jsonString = '{"error":"json_encoding_failed"}'
-	else
-		jsonString = result
-	end
-
-	sendViaHTTP(jsonString)
 end
 
 function FroststrapStudioRPC.SendMessage(data)
-	if not FroststrapStudioRPC.Config.enabled then return end
 	if State.isCooldown then return end
-
-	State.isCooldown = true
-	task.spawn(function()
-		task.wait(1)
-		State.isCooldown = false
-	end)
-
-	local presenceData = {
-		details = data.details or "",
-		state = data.state or "",
-		testing = data.testing or false,
-		scriptType = data.scriptType or ScriptTypes.DEVELOPING,
-	}
-
-	local messageToSend = {
-		command = "SetRichPresence",
-		data = presenceData
-	}
-
-	local jsonString
-	local success, result = pcall(function()
-		return HttpService:JSONEncode(messageToSend)
-	end)
-
-	if not success then
-		jsonString = '{"error":"json_encoding_failed"}'
-	else
-		jsonString = result
+	local isRedundant = true
+	for k, v in pairs(data) do
+		if State.lastPayload[k] ~= v then
+			isRedundant = false
+			break
+		end
 	end
-
-	sendViaHTTP(jsonString)
+	if isRedundant then return end
+	State.lastPayload = data
+	State.isCooldown = true
+	task.delay(1.5, function() State.isCooldown = false end)
+	sendViaHTTP({
+		command = "SetRichPresence",
+		data = data
+	})
 end
 
 function FroststrapStudioRPC.UpdatePresence()
 	if not FroststrapStudioRPC.Config.enabled then return end
-	local activityData = collectActivityData()
-	if not activityData then return end
-	if hasActivityChanged(activityData) then
-		FroststrapStudioRPC.SendMessage(activityData)
-		updateStateCache(activityData)
-	end
-end
-
-function FroststrapStudioRPC.ForceUpdate()
-	local activityData = collectActivityData()
-	if activityData then
-		FroststrapStudioRPC.SendMessage(activityData)
-		updateStateCache(activityData)
+	local data = collectActivityData()
+	if data then
+		FroststrapStudioRPC.SendMessage(data)
 	end
 end
 
 function FroststrapStudioRPC.SetEnabled(enabled)
 	FroststrapStudioRPC.Config.enabled = enabled
-
-	sendToggleCommand(enabled)
-
+	local workspaceName, isPublic = getWorkspaceName()
+	sendViaHTTP({
+		command = "RPCToggle",
+		data = { enabled = enabled, workspace = workspaceName, isPublic = isPublic }
+	})
 	if enabled then
-		startMonitoring()
-		task.wait(0.1)
-		FroststrapStudioRPC.ForceUpdate()
-		if Button then 
-			Button:SetActive(true)
+		FroststrapStudioRPC.UpdatePresence()
+		if not State.monitoringThread then
+			State.monitoringThread = task.spawn(function()
+				while FroststrapStudioRPC.Config.enabled do
+					task.wait(FroststrapStudioRPC.Config.updateInterval)
+					FroststrapStudioRPC.UpdatePresence()
+				end
+				State.monitoringThread = nil
+			end)
 		end
 	else
-		stopMonitoring()
-		if Button then 
-			Button:SetActive(false)
-		end
+		State.monitoringThread = nil
 	end
-end
-
-function FroststrapStudioRPC.Toggle()
-	FroststrapStudioRPC.SetEnabled(not FroststrapStudioRPC.Config.enabled)
 end
 
 function FroststrapStudioRPC.Initialize()
-	if State.isInitialized then return end
+	if State.isInitialized or not Plugin then return end
 
-	if Plugin then
-		Toolbar = Plugin:CreateToolbar("Froststrap RPC")
-		Button = Toolbar:CreateButton("RPC", "Toggle RPC Info (Script type, Lines amount, Etc)", "rbxassetid://111400040119373")
-		Button.Click:Connect(function()
-			FroststrapStudioRPC.Toggle()
-		end)
-		Button:SetActive(FroststrapStudioRPC.Config.enabled)
+	local toggleAction = Plugin:CreatePluginAction(
+		"toggle_rpc_command",
+		"Toggle Froststrap RPC",
+		"Toggle Discord Rich Presence logging",
+		"rbxassetid://111400040119373",
+		true
+	)
 
-		sendToggleCommand(FroststrapStudioRPC.Config.enabled)
+	State.connections.Toggle = toggleAction.Triggered:Connect(function()
+		FroststrapStudioRPC.SetEnabled(not FroststrapStudioRPC.Config.enabled)
+	end)
 
-		local toggleAction = Plugin:CreatePluginAction(
-			"toggle_rpc_command",
-			"Toggle RPC",
-			"Toggle Rich Presence logging on/off",
-			"rbxassetid://111400040119373",
-			false
-		)
+	State.connections.Selection = Selection.SelectionChanged:Connect(function()
+		FroststrapStudioRPC.UpdatePresence()
+	end)
 
-		toggleAction.Triggered:Connect(function()
-			FroststrapStudioRPC.Toggle()
-		end)
+	State.connections.TabSwitch = StudioService:GetPropertyChangedSignal("ActiveScript"):Connect(function()
+		FroststrapStudioRPC.UpdatePresence()
+	end)
 
-		Plugin.Unloading:Connect(function()
-			FroststrapStudioRPC.Cleanup()
-		end)
-	end
+	State.connections.Unload = Plugin.Unloading:Connect(function()
+		FroststrapStudioRPC.SetEnabled(false)
+		clearConnections()
+	end)
 
-	if Plugin and Selection then
-		Selection.SelectionChanged:Connect(function()
-			State.selectionChanged = true
-			FroststrapStudioRPC.UpdatePresence()
-		end)
-	end
-
-	if FroststrapStudioRPC.Config.enabled then
-		startMonitoring()
-		task.wait(0.5)
-		FroststrapStudioRPC.ForceUpdate()
-	end
-
+	FroststrapStudioRPC.SetEnabled(FroststrapStudioRPC.Config.enabled)
 	State.isInitialized = true
 end
 
-function FroststrapStudioRPC.Cleanup()
-	if FroststrapStudioRPC.Config.enabled then
-		sendToggleCommand(false)
-	end
-
-	stopMonitoring()
-	FroststrapStudioRPC.SetEnabled(false)
-	State.isInitialized = false
-	if Button then
-		Button:Destroy()
-		Button = nil
-	end
-	Toolbar = nil
-end
-
 if Plugin then
-	task.spawn(function()
-		FroststrapStudioRPC.Initialize()
-	end)
+	FroststrapStudioRPC.Initialize()
 end
 
 return FroststrapStudioRPC
