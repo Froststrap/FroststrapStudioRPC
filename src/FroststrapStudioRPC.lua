@@ -1,4 +1,5 @@
 -- FroststrapStudioRPC SDK v1.2.0
+
 local Selection = game:GetService("Selection")
 local RunService = game:GetService("RunService")
 local HttpService = game:GetService("HttpService")
@@ -62,6 +63,7 @@ local function getScriptType(scriptObj)
 		return ScriptTypes.CLIENT
 	end
 	if scriptObj:IsA("LocalScript") then return ScriptTypes.CLIENT end
+
 	local isServerContext = false
 	local isClientContext = false
 	local ancestor = scriptObj.Parent
@@ -75,6 +77,7 @@ local function getScriptType(scriptObj)
 		end
 		ancestor = ancestor.Parent
 	end
+
 	if scriptObj:IsA("ModuleScript") then
 		if isServerContext then return ScriptTypes.SERVER_MODULE end
 		if isClientContext then return ScriptTypes.CLIENT_MODULE end
@@ -83,25 +86,26 @@ local function getScriptType(scriptObj)
 	return isServerContext and ScriptTypes.SERVER or ScriptTypes.CLIENT
 end
 
-local function getWorkspaceName()
+local function getWorkspaceData()
 	local name = "Unsaved Studio Project"
 	local isPublic = false
+
 	if game.PlaceId > 0 then
 		local success, info = pcall(function()
 			return MarketplaceService:GetProductInfoAsync(game.PlaceId)
 		end)
 		if success and info then
 			name = info.Name or name
-			isPublic = true
+			isPublic = true 
 		end
 	else
 		name = (game.Name ~= "Place" and game.Name ~= "") and game.Name or name
 	end
+
 	local devCount = #Players:GetPlayers()
-	if devCount > 1 then
-		name = string.format("%s (%d Developers)", name, devCount)
-	end
-	return name, isPublic
+	if devCount == 0 then devCount = 1 end
+
+	return name, isPublic, devCount
 end
 
 local function collectActivityData()
@@ -110,11 +114,9 @@ local function collectActivityData()
 	local activeScript = StudioService.ActiveScript
 	local scriptObj = nil
 
-	-- Prioritize the script currently open in the editor
 	if activeScript and activeScript:IsA("LuaSourceContainer") then
 		scriptObj = activeScript
 	else
-		-- Fix: Selection:Get() returns a table. We must index [1] to use :IsA()
 		local selected = Selection:Get()
 		if #selected == 1 and selected[1]:IsA("LuaSourceContainer") then
 			scriptObj = selected[1]
@@ -122,23 +124,24 @@ local function collectActivityData()
 	end
 
 	local testing = RunService:IsRunning()
-	local workspaceName, isPublic = getWorkspaceName()
+	local workspaceName, isPublic, devCount = getWorkspaceData()
 	local stateText = "Not in a Script"
 	local scriptType = ScriptTypes.DEVELOPING
 
 	if scriptObj then
 		scriptType = getScriptType(scriptObj)
 		local lines = getScriptLineCount(scriptObj)
-		stateText = string.format("Editing %s: %s (%d lines)", scriptObj.Name, scriptType, lines)
+		stateText = string.format("Editing %s (%d lines)", scriptObj.Name, lines)
 	end
 
 	return {
-		details = "Workspace: ".. workspaceName,
+		details = workspaceName,
 		state = stateText,
 		testing = testing,
 		scriptType = scriptType,
 		placeId = game.PlaceId,
-		isPublic = isPublic
+		isPublic = isPublic,
+		devCount = devCount
 	}
 end   
 
@@ -186,7 +189,7 @@ end
 
 function FroststrapStudioRPC.SetEnabled(enabled)
 	FroststrapStudioRPC.Config.enabled = enabled
-	local workspaceName, isPublic = getWorkspaceName()
+	local workspaceName, isPublic, devCount = getWorkspaceData()
 	sendViaHTTP({
 		command = "RPCToggle",
 		data = { enabled = enabled, workspace = workspaceName, isPublic = isPublic }
@@ -227,6 +230,14 @@ function FroststrapStudioRPC.Initialize()
 	end)
 
 	State.connections.TabSwitch = StudioService:GetPropertyChangedSignal("ActiveScript"):Connect(function()
+		FroststrapStudioRPC.UpdatePresence()
+	end)
+
+	State.connections.DevJoin = Players.PlayerAdded:Connect(function()
+		FroststrapStudioRPC.UpdatePresence()
+	end)
+
+	State.connections.DevLeave = Players.PlayerRemoving:Connect(function()
 		FroststrapStudioRPC.UpdatePresence()
 	end)
 
